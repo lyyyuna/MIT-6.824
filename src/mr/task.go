@@ -1,6 +1,9 @@
 package mr
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 type TaskStat int
 
@@ -25,6 +28,14 @@ type Task struct {
 	State     TaskStat
 	Deadline  time.Duration
 	FileNames []string
+	NReduce   int
+	WorkerId  int
+}
 
-	WorkerId int
+func reduceFileName(mapId, reduceId int) string {
+	return fmt.Sprintf("mr-%v-%v", mapId, reduceId)
+}
+
+func mergeFilename(reduceId int) string {
+	return fmt.Sprintf("mr-out-%v", reduceId)
 }

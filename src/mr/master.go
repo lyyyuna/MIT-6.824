@@ -86,12 +86,14 @@ func MakeMaster(files []string, nReduce int) *Master {
 		mapTasks:        make([]*Task, len(files)),
 		reduceTasks:     make([]*Task, nReduce),
 		workerCount:     0,
+		mapTaskChan:     make(chan *Task, len(files)),
+		reduceTaskChan:  make(chan *Task, nReduce),
 	}
 	// Your code here.
 
 	m.server()
 	m.generateMapTasks()
-	log.Println("master init")
+	DPrintf("master init")
 	return &m
 }
 
@@ -103,6 +105,7 @@ func (m *Master) generateMapTasks() {
 			State:     TASK_READY,
 			Deadline:  5 * time.Second,
 			FileNames: []string{file},
+			NReduce:   m.nReduce,
 		}
 		m.mapTasks[i] = mapTask
 		m.mapTaskChan <- mapTask
@@ -116,8 +119,13 @@ func (m *Master) generateReduceTasks() {
 			Type:      REDUCE,
 			State:     TASK_READY,
 			Deadline:  5 * time.Second,
-			FileNames: m.intermediateFiles[i],
+			FileNames: make([]string, 0),
+			NReduce:   m.nReduce,
 		}
+		for j := 0; j < m.nMap; j++ {
+			reduceTask.FileNames = append(reduceTask.FileNames, reduceFileName(j, i))
+		}
+
 		m.reduceTasks[i] = reduceTask
 		m.reduceTaskChan <- reduceTask
 	}
@@ -139,11 +147,15 @@ func (m *Master) FinishTask(args *ReportTaskArg, reply *ReportTaskReply) error {
 	switch args.Task.Type {
 	case MAP:
 		DPrintf("finish one map task: %v, filename: %v", args.Task.Id, args.Task.FileNames[0])
+		if args.Task.State == TASK_ERR {
+			DPrintf("master receive error task, resceduling")
+			m.mapTaskChan <- m.mapTasks[args.Task.Id]
+		}
 		m.mapTasks[args.Task.Id].State = TASK_FINISH
 		m.nCompleteMap += 1
-		for i := 0; i < m.nReduce; i++ {
-			m.intermediateFiles[i] = append(m.intermediateFiles[i], args.intermediateFiles[i])
-		}
+		// for i := 0; i < m.nReduce; i++ {
+		// 	m.intermediateFiles[i] = append(m.intermediateFiles[i], args.intermediateFiles[i])
+		// }
 
 		if m.nCompleteMap == m.nMap {
 			DPrintf("all map tasks finished")
@@ -152,6 +164,10 @@ func (m *Master) FinishTask(args *ReportTaskArg, reply *ReportTaskReply) error {
 		}
 	case REDUCE:
 		DPrintf("finish one reduce task: %v, filename: %v", args.Task.Id, args.Task.FileNames)
+		if args.Task.State == TASK_ERR {
+			DPrintf("master receive error task, resceduling")
+			m.reduceTaskChan <- m.reduceTasks[args.Task.Id]
+		}
 		m.reduceTasks[args.Task.Id].State = TASK_FINISH
 		m.nCompleteReduce += 1
 

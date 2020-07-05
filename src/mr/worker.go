@@ -1,10 +1,14 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"io/ioutil"
 	"log"
 	"net/rpc"
+	"os"
+	"strings"
 )
 
 //
@@ -39,9 +43,12 @@ func Worker(mapf func(string, string) []KeyValue,
 
 	// Your worker implementation here.
 
-	w := worker{}
+	w := worker{
+		mapf:    mapf,
+		reducef: reducef,
+	}
 	w.register()
-
+	w.run()
 }
 
 // register self to Master
@@ -53,6 +60,128 @@ func (w *worker) register() {
 	}
 	w.id = reply.Id
 	DPrintf("worker %v register", w.id)
+}
+
+func (w *worker) run() {
+	for {
+		t := w.gettask()
+		w.dotask(t)
+	}
+}
+
+func (w *worker) gettask() *Task {
+	args := &PullTaskArg{}
+	reply := &PullTaskReply{}
+
+	if ok := call("Master.GetOneTask", args, reply); !ok {
+		DPrintf("get one task failed")
+		DPrintf("worker exited")
+		os.Exit(1)
+	}
+	DPrintf("get one task: %v", reply.Task)
+	return reply.Task
+}
+
+func (w *worker) dotask(t *Task) {
+	switch t.Type {
+	case MAP:
+		w.doMapTask(t)
+	case REDUCE:
+		w.doReduceTask(t)
+	default:
+		panic("unknown task type")
+	}
+}
+
+func (w *worker) reportTask(t *Task, err error) {
+	args := &ReportTaskArg{
+		Task: t,
+	}
+	if err != nil {
+		args.Task.State = TASK_ERR
+	}
+	reply := &ReportTaskReply{}
+	if ok := call("Master.FinishTask", args, reply); !ok {
+		DPrintf("report task failed")
+	}
+
+}
+
+func (w *worker) doMapTask(t *Task) {
+	contents, err := ioutil.ReadFile(t.FileNames[0])
+	if err != nil {
+		log.Printf("read file error: %v", err)
+		w.reportTask(t, err)
+		return
+	}
+
+	kvs := w.mapf(t.FileNames[0], string(contents))
+	reduces := make([][]KeyValue, t.NReduce)
+
+	for _, kv := range kvs {
+		idx := ihash(kv.Key) % t.NReduce
+		reduces[idx] = append(reduces[idx], kv)
+	}
+
+	for reduceIndex, content := range reduces {
+		filename := reduceFileName(t.Id, reduceIndex)
+		f, err := os.Create(filename)
+		defer f.Close()
+		if err != nil {
+			log.Printf("create file error: %v", err)
+			w.reportTask(t, err)
+			return
+		}
+
+		enc := json.NewEncoder(f)
+		for _, kv := range content {
+			if err := enc.Encode(&kv); err != nil {
+				w.reportTask(t, err)
+				return
+			}
+		}
+	}
+
+	w.reportTask(t, nil)
+}
+
+func (w *worker) doReduceTask(t *Task) {
+	mergeKeys := make(map[string][]string)
+	for _, itermediateFile := range t.FileNames {
+		f, err := os.Open(itermediateFile)
+		if err != nil {
+			DPrintf("fail to open itermediateFile: %v, error: %v", itermediateFile, err)
+			w.reportTask(t, err)
+		}
+		defer f.Close()
+
+		dec := json.NewDecoder(f)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				// DPrintf("decode error: %v", err)
+				// EOF
+				break
+			}
+
+			if _, ok := mergeKeys[kv.Key]; !ok {
+				mergeKeys[kv.Key] = make([]string, 0)
+			}
+			mergeKeys[kv.Key] = append(mergeKeys[kv.Key], kv.Value)
+		}
+	}
+
+	mergeFileName := mergeFilename(t.Id)
+	res := make([]string, 0)
+	for k, v := range mergeKeys {
+		res = append(res, fmt.Sprintf("%v %v", k, len(v)))
+	}
+	if err := ioutil.WriteFile(mergeFileName, []byte(strings.Join(res, "\n")), 0600); err != nil {
+		w.reportTask(t, err)
+		return
+	}
+
+	w.reportTask(t, nil)
 }
 
 //
