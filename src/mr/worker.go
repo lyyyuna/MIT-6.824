@@ -75,7 +75,7 @@ func (w *worker) gettask() *Task {
 
 	if ok := call("Master.GetOneTask", args, reply); !ok {
 		DPrintf("get one task failed")
-		DPrintf("worker exited")
+		DPrintf("worker %v exited", w.id)
 		os.Exit(1)
 	}
 	DPrintf("get one task: %v", reply.Task)
@@ -102,7 +102,7 @@ func (w *worker) reportTask(t *Task, err error) {
 	}
 	reply := &ReportTaskReply{}
 	if ok := call("Master.FinishTask", args, reply); !ok {
-		DPrintf("report task failed")
+		DPrintf("report task failed, type: %v, task: %v", t.Type, t.Id)
 	}
 
 }
@@ -145,6 +145,12 @@ func (w *worker) doMapTask(t *Task) {
 	w.reportTask(t, nil)
 }
 
+//
+// intermediateFiles
+//              列0            列1           列2
+// 行0-reduce-0 [map1-reduce0，map2-reduce0，map3-reduce0......]
+// 行1-reduce-1 [map1-reduce1，map2-reduce1，map3-reduce1......]
+// 行2-reduce-2 [map1-reduce2，map2-reduce2，map3-reduce2......]
 func (w *worker) doReduceTask(t *Task) {
 	mergeKeys := make(map[string][]string)
 	for _, itermediateFile := range t.FileNames {
@@ -174,9 +180,9 @@ func (w *worker) doReduceTask(t *Task) {
 	mergeFileName := mergeFilename(t.Id)
 	res := make([]string, 0)
 	for k, v := range mergeKeys {
-		res = append(res, fmt.Sprintf("%v %v", k, len(v)))
+		res = append(res, fmt.Sprintf("%v %v\n", k, w.reducef(k, v)))
 	}
-	if err := ioutil.WriteFile(mergeFileName, []byte(strings.Join(res, "\n")), 0600); err != nil {
+	if err := ioutil.WriteFile(mergeFileName, []byte(strings.Join(res, "")), 0600); err != nil {
 		w.reportTask(t, err)
 		return
 	}

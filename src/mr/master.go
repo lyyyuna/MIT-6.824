@@ -38,7 +38,7 @@ type Master struct {
 
 	mapTaskChan    chan *Task
 	reduceTaskChan chan *Task
-	mu             sync.Mutex
+	mu             sync.RWMutex
 	workerCount    int
 }
 
@@ -63,6 +63,8 @@ func (m *Master) server() {
 // if the entire job has finished.
 //
 func (m *Master) Done() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.state == MASTER_REDUCE_FINISHED {
 		return true
 	} else {
@@ -103,7 +105,7 @@ func (m *Master) generateMapTasks() {
 			Id:        i,
 			Type:      MAP,
 			State:     TASK_READY,
-			Deadline:  5 * time.Second,
+			Deadline:  10 * time.Second,
 			FileNames: []string{file},
 			NReduce:   m.nReduce,
 		}
@@ -118,7 +120,7 @@ func (m *Master) generateReduceTasks() {
 			Id:        i,
 			Type:      REDUCE,
 			State:     TASK_READY,
-			Deadline:  5 * time.Second,
+			Deadline:  10 * time.Second,
 			FileNames: make([]string, 0),
 			NReduce:   m.nReduce,
 		}
@@ -135,12 +137,47 @@ func (m *Master) GetOneTask(args *PullTaskArg, reply *PullTaskReply) error {
 	select {
 	case mapTask := <-m.mapTaskChan:
 		reply.Task = mapTask
+		go m.monitorTask(mapTask)
 		DPrintf("assign one map task: %v, filename: %v", mapTask.Id, mapTask.FileNames[0])
 	case reduceTask := <-m.reduceTaskChan:
 		reply.Task = reduceTask
+		go m.monitorTask(reduceTask)
 		DPrintf("assign one reduce task: %v, filename: %v", reduceTask.Id, reduceTask.FileNames)
 	}
 	return nil
+}
+
+func (m *Master) monitorTask(t *Task) {
+	timer := time.NewTicker(t.Deadline)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-timer.C:
+			t.State = TASK_READY
+			DPrintf("ERROR, one task failed: %v", t)
+			if t.Type == MAP {
+				m.mapTaskChan <- t
+			} else {
+				m.reduceTaskChan <- t
+			}
+
+		default:
+			time.Sleep(100 * time.Millisecond)
+			// if t.Type == MAP {
+			// 	if m.mapTasks[t.Id].State == TASK_FINISH {
+			// 		return
+			// 	}
+			// } else {
+			// 	if m.reduceTasks[t.Id].State == TASK_FINISH {
+			// 		return
+			// 	}
+			// }
+			if t.State == TASK_FINISH {
+				return
+			}
+		}
+	}
 }
 
 func (m *Master) FinishTask(args *ReportTaskArg, reply *ReportTaskReply) error {
@@ -152,14 +189,18 @@ func (m *Master) FinishTask(args *ReportTaskArg, reply *ReportTaskReply) error {
 			m.mapTaskChan <- m.mapTasks[args.Task.Id]
 		}
 		m.mapTasks[args.Task.Id].State = TASK_FINISH
+		m.mu.Lock()
 		m.nCompleteMap += 1
+		m.mu.Unlock()
 		// for i := 0; i < m.nReduce; i++ {
 		// 	m.intermediateFiles[i] = append(m.intermediateFiles[i], args.intermediateFiles[i])
 		// }
 
 		if m.nCompleteMap == m.nMap {
 			DPrintf("all map tasks finished")
+			m.mu.Lock()
 			m.state = MASTER_MAP_FINISHED
+			m.mu.Unlock()
 			go m.generateReduceTasks()
 		}
 	case REDUCE:
@@ -169,7 +210,9 @@ func (m *Master) FinishTask(args *ReportTaskArg, reply *ReportTaskReply) error {
 			m.reduceTaskChan <- m.reduceTasks[args.Task.Id]
 		}
 		m.reduceTasks[args.Task.Id].State = TASK_FINISH
+		m.mu.Lock()
 		m.nCompleteReduce += 1
+		m.mu.Unlock()
 
 		if m.nCompleteReduce == m.nReduce {
 			DPrintf("all reduce tasks finished")
