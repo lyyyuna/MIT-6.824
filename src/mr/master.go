@@ -7,13 +7,12 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-type MasterState int
-
 const (
-	MASTER_INIT MasterState = iota
+	MASTER_INIT int32 = iota
 	MASTER_MAP_FINISHED
 	MASTER_REDUCE_FINISHED
 )
@@ -27,14 +26,14 @@ const (
 type Master struct {
 	// Your definitions here.
 	files             []string
-	state             MasterState
+	state             int32
 	mapTasks          []*Task
 	reduceTasks       []*Task
 	intermediateFiles [][]string
-	nReduce           int
-	nMap              int
-	nCompleteReduce   int
-	nCompleteMap      int
+	nReduce           int32
+	nMap              int32
+	nCompleteReduce   int32
+	nCompleteMap      int32
 
 	mapTaskChan    chan *Task
 	reduceTaskChan chan *Task
@@ -65,7 +64,7 @@ func (m *Master) server() {
 func (m *Master) Done() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.state == MASTER_REDUCE_FINISHED {
+	if atomic.LoadInt32(&m.state) == MASTER_REDUCE_FINISHED {
 		return true
 	} else {
 		return false
@@ -81,8 +80,8 @@ func MakeMaster(files []string, nReduce int) *Master {
 	m := Master{
 		files:           files,
 		state:           MASTER_INIT,
-		nReduce:         nReduce,
-		nMap:            len(files),
+		nReduce:         int32(nReduce),
+		nMap:            int32(len(files)),
 		nCompleteReduce: 0,
 		nCompleteMap:    0,
 		mapTasks:        make([]*Task, len(files)),
@@ -107,7 +106,7 @@ func (m *Master) generateMapTasks() {
 			State:     TASK_READY,
 			Deadline:  10 * time.Second,
 			FileNames: []string{file},
-			NReduce:   m.nReduce,
+			NReduce:   int(m.nReduce),
 		}
 		m.mapTasks[i] = mapTask
 		m.mapTaskChan <- mapTask
@@ -115,16 +114,16 @@ func (m *Master) generateMapTasks() {
 }
 
 func (m *Master) generateReduceTasks() {
-	for i := 0; i < m.nReduce; i++ {
+	for i := 0; i < int(m.nReduce); i++ {
 		reduceTask := &Task{
 			Id:        i,
 			Type:      REDUCE,
 			State:     TASK_READY,
 			Deadline:  10 * time.Second,
 			FileNames: make([]string, 0),
-			NReduce:   m.nReduce,
+			NReduce:   int(m.nReduce),
 		}
-		for j := 0; j < m.nMap; j++ {
+		for j := 0; j < int(m.nMap); j++ {
 			reduceTask.FileNames = append(reduceTask.FileNames, reduceFileName(j, i))
 		}
 
@@ -136,13 +135,27 @@ func (m *Master) generateReduceTasks() {
 func (m *Master) GetOneTask(args *PullTaskArg, reply *PullTaskReply) error {
 	select {
 	case mapTask := <-m.mapTaskChan:
-		reply.Task = mapTask
+		sendTask := Task{
+			Id:        mapTask.Id,
+			FileNames: mapTask.FileNames,
+			Type:      mapTask.Type,
+			NReduce:   mapTask.NReduce,
+			State:     atomic.LoadInt32(&mapTask.State),
+		}
+		reply.Task = &sendTask
 		go m.monitorTask(mapTask)
-		DPrintf("assign one map task: %v, filename: %v", mapTask.Id, mapTask.FileNames[0])
+		DPrintf("assign one map task: %v, filename: %v", sendTask.Id, sendTask.FileNames[0])
 	case reduceTask := <-m.reduceTaskChan:
-		reply.Task = reduceTask
+		sendTask := Task{
+			Id:        reduceTask.Id,
+			FileNames: reduceTask.FileNames,
+			Type:      reduceTask.Type,
+			NReduce:   reduceTask.NReduce,
+			State:     atomic.LoadInt32(&reduceTask.State),
+		}
+		reply.Task = &sendTask
 		go m.monitorTask(reduceTask)
-		DPrintf("assign one reduce task: %v, filename: %v", reduceTask.Id, reduceTask.FileNames)
+		DPrintf("assign one reduce task: %v, filename: %v", sendTask.Id, sendTask.FileNames)
 	}
 	return nil
 }
@@ -154,7 +167,7 @@ func (m *Master) monitorTask(t *Task) {
 	for {
 		select {
 		case <-timer.C:
-			t.State = TASK_READY
+			atomic.StoreInt32(&t.State, TASK_READY)
 			DPrintf("ERROR, one task failed: %v", t)
 			if t.Type == MAP {
 				m.mapTaskChan <- t
@@ -173,7 +186,8 @@ func (m *Master) monitorTask(t *Task) {
 			// 		return
 			// 	}
 			// }
-			if t.State == TASK_FINISH {
+			taskState := atomic.LoadInt32(&t.State)
+			if taskState == TASK_FINISH {
 				return
 			}
 		}
@@ -188,19 +202,12 @@ func (m *Master) FinishTask(args *ReportTaskArg, reply *ReportTaskReply) error {
 			DPrintf("master receive error task, resceduling")
 			m.mapTaskChan <- m.mapTasks[args.Task.Id]
 		}
-		m.mapTasks[args.Task.Id].State = TASK_FINISH
-		m.mu.Lock()
-		m.nCompleteMap += 1
-		m.mu.Unlock()
-		// for i := 0; i < m.nReduce; i++ {
-		// 	m.intermediateFiles[i] = append(m.intermediateFiles[i], args.intermediateFiles[i])
-		// }
+		atomic.StoreInt32(&m.mapTasks[args.Task.Id].State, TASK_FINISH)
+		atomic.AddInt32(&m.nCompleteMap, 1)
 
-		if m.nCompleteMap == m.nMap {
+		if atomic.LoadInt32(&m.nCompleteMap) == m.nMap {
 			DPrintf("all map tasks finished")
-			m.mu.Lock()
-			m.state = MASTER_MAP_FINISHED
-			m.mu.Unlock()
+			atomic.StoreInt32(&m.state, MASTER_MAP_FINISHED)
 			go m.generateReduceTasks()
 		}
 	case REDUCE:
@@ -209,15 +216,14 @@ func (m *Master) FinishTask(args *ReportTaskArg, reply *ReportTaskReply) error {
 			DPrintf("master receive error task, resceduling")
 			m.reduceTaskChan <- m.reduceTasks[args.Task.Id]
 		}
-		m.reduceTasks[args.Task.Id].State = TASK_FINISH
-		m.mu.Lock()
-		m.nCompleteReduce += 1
-		m.mu.Unlock()
+		atomic.StoreInt32(&m.reduceTasks[args.Task.Id].State, TASK_FINISH)
+		atomic.AddInt32(&m.nCompleteReduce, 1)
 
-		if m.nCompleteReduce == m.nReduce {
+		if atomic.LoadInt32(&m.nCompleteReduce) == m.nReduce {
 			DPrintf("all reduce tasks finished")
-			m.state = MASTER_REDUCE_FINISHED
+			atomic.StoreInt32(&m.state, MASTER_REDUCE_FINISHED)
 		}
+
 	}
 
 	return nil

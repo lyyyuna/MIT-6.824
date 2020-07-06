@@ -7,7 +7,7 @@
 RACE=
 
 # uncomment this to run the tests with the Go race detector.
-#RACE=-race
+RACE=-race
 
 # run the test in a fresh sub-directory.
 rm -rf mr-tmp
@@ -98,7 +98,6 @@ fi
 
 wait ; wait
 
-
 echo '***' Starting map parallelism test.
 
 rm -f mr-out* mr-worker*
@@ -128,7 +127,6 @@ fi
 
 wait ; wait
 
-
 echo '***' Starting reduce parallelism test.
 
 rm -f mr-out* mr-worker*
@@ -150,7 +148,6 @@ else
 fi
 
 wait ; wait
-
 
 # generate the correct output
 ../mrsequential ../../mrapps/nocrash.so ../pg*txt || exit 1

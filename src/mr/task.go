@@ -8,7 +8,7 @@ import (
 type TaskStat int
 
 const (
-	TASK_READY TaskStat = iota
+	TASK_READY int32 = iota
 	TASK_RUNNING
 	TASK_FINISH
 	TASK_ERR
@@ -25,7 +25,7 @@ const (
 type Task struct {
 	Id        int
 	Type      TaskType
-	State     TaskStat
+	State     int32
 	Deadline  time.Duration
 	FileNames []string
 	NReduce   int
