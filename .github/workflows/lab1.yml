@@ -1,4 +1,4 @@
-name: Go
+name: Lab 1 - MapReduce
 
 on:
   push:
@@ -9,7 +9,7 @@ on:
 jobs:
 
   build:
-    name: Check
+    name: Lab 1 - MapReduce
     runs-on: ubuntu-latest
     steps:
 
